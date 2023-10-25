@@ -22,6 +22,8 @@ use pest::Parser;
 use newick;
 use std::fs;
 use std::env;
+use std::fs::File;
+use std::io::Write;
 use time::Instant;
 extern crate regex;
 use regex::Regex;
@@ -47,7 +49,7 @@ struct Tree {
     nodes: Vec<Node>,
     root: Option<usize>,
 }
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct FlatNode {
     name: String,
     left_child: Option<usize>,
@@ -70,6 +72,7 @@ struct DurationAndContemporaneity {
 
 use pest::error::Error;
 
+// The following two functions are used to convert a newick string into an arborescent Tree structure, where each "Node" object owns its two children in a Box object.
 fn newick_to_tree(pair: pest::iterators::Pair<Rule>) -> Vec<Node> {
     let mut vec_trees:Vec<Node> = Vec::new();
     for inner in pair.into_inner() {
@@ -78,7 +81,6 @@ fn newick_to_tree(pair: pest::iterators::Pair<Rule>) -> Vec<Node> {
     }
     return vec_trees
 }
-
 
 fn handle_pair(pair: pest::iterators::Pair<Rule>) -> Option<Node> {
     match pair.as_rule() {
@@ -186,11 +188,15 @@ fn handle_pair(pair: pest::iterators::Pair<Rule>) -> Option<Node> {
     }
 }
 
+
+// Convert a Tree in "Node" form to a Newick string.
 fn node_to_newick(node: &Node) -> String {
     /* Takes a node and returns the corresponding subtree in Newick format.
-        ARGUMENTS:
+        --------------------------------
+        INPUT:
             - node: the node to convert to Newick format.
-        RETURNS:
+
+        OUTPUT:
             - the Newick representation of the subtree rooted at node.
         Warning: rounds the lengths to 6 decimal places.
     */
@@ -211,6 +217,14 @@ fn node_to_newick(node: &Node) -> String {
 
 // Convert from FlatNode to Node
 fn flat_to_node(flat_tree: &[FlatNode], index: usize, parent_index: Option<usize>) -> Option<Node> {
+    /*
+    This function converts a flat tree into an arborescent tree.
+
+    Input: a flat tree, the index of a node in the flat tree, and the index of its parent.
+    Output: the corresponding node in the arborescent tree.
+
+    Warning: can bug if applied directly to a non-root node, which will be mistaken for a root node.
+    */
     let flat_node = &flat_tree[index];
     let left_child = flat_node.left_child.and_then(|i| {
         flat_to_node(flat_tree, i, Some(index)).map(Box::new)
@@ -277,10 +291,10 @@ fn total_length_of_flat_tree(flat_tree: &[FlatNode]) -> f64 {
 fn give_depth(node: &mut Node, depth: f64) {
     node.depth = Some(depth);
     if let Some(left_child) = &mut node.left_child {
-        give_depth(left_child, depth + node.length);
+        give_depth(left_child, depth + left_child.length);
     }
     if let Some(right_child) = &mut node.right_child {
-        give_depth(right_child, depth + node.length);
+        give_depth(right_child, depth + right_child.length);
     }
 }
 
@@ -342,10 +356,10 @@ fn find_contemporaneity(flat_tree: &mut Vec<FlatNode>, depths: &Vec<f64>) -> Vec
         let end_time = flat_tree[i].depth.unwrap();
         let start_index = find_closest_index(&depths, start_time);
         let end_index = find_closest_index(&depths, end_time);
-        for j in start_index+1..end_index {
+        //println!("Start index: {}, end index: {}", start_index, end_index);
+        for j in start_index+1..end_index+1 {
             // We don't count the start index, because the node is not alive on the interval that ends at the start index.
             contemporaneity[j].push(i);
-
         }
     }
     return contemporaneity;
@@ -364,12 +378,12 @@ fn make_CDF(intervals: Vec<f64>, number_of_species: Vec<f64>) -> Vec<f64> {
     // Returns the CDF of the depth of a random time of a transfer, uniformly distributed on branches.
     let n = intervals.len();
     let mut CDF: Vec<f64> = Vec::new();
-    CDF.push(0.0 as f64);
-    for i in 0..n {
-        CDF.push(CDF[i] + intervals[i]*number_of_species[i]);
+    CDF.push(intervals[0]*number_of_species[0]);
+    for i in 1..n {
+        CDF.push(CDF[i-1] + intervals[i]*number_of_species[i]);
     }
-    let total_value = CDF[n];
-    for i in 0..n+1 {
+    let total_value = CDF[n-1];
+    for i in 0..n {
         CDF[i] = CDF[i]/total_value;
     }
     return CDF;
@@ -387,6 +401,7 @@ fn choose_from_CDF(CDF: &Vec<f64>, depths: &Vec<f64>) -> (f64, usize) {
 
      returns the index of the smallest depth larger than the depth that was picked
     */
+
     let mut rng = thread_rng();
     let r: f64 = rng.gen_range(0.0..1.0);
     let index = match CDF.binary_search_by(|&probe| probe.partial_cmp(&r).unwrap_or(std::cmp::Ordering::Less)) {
@@ -395,7 +410,7 @@ fn choose_from_CDF(CDF: &Vec<f64>, depths: &Vec<f64>) -> (f64, usize) {
             if index == CDF.len() {
                 // `r` is greater than any number in CDF.
                 // Return the last index, or handle this case differently depending on your needs.
-                panic!("r is greater than any number in CDF, including the last one which should be 1.0");
+                panic!("r is greater than any number in CDF, including the last one which should be 1.0. The CDF is: {:?}", CDF);
             } else {
                 // No exact match, but `index` is where `r` would be inserted to maintain order.
                 // This means `CDF[index]` is the first value greater than or equal to `r`.
@@ -403,7 +418,7 @@ fn choose_from_CDF(CDF: &Vec<f64>, depths: &Vec<f64>) -> (f64, usize) {
             }
         }
     };
-
+    //println!("r: {}, index: {}", r, index);
     let depth = (r - CDF[index-1])/(CDF[index] - CDF[index-1]) * (depths[index] - depths[index-1]) + depths[index-1];
     return (depth, index);
 }
@@ -437,23 +452,36 @@ fn generate_transfers(n_transfers: usize, contemporaneity: &Vec<Vec<usize>>, CDF
     return transfers;
 }
 
+
+
 fn change_tree_comes_from_root_child(flat_tree: &mut Vec<FlatNode>, transfer: (usize, usize, f64)){
-    /* In this special case,
+    /* In this special case, the donor is a child of the root. We exclude the case where the receiver is also a child of the root for now.
     
+    - The new root is the sister of the donor SA.
+
     */ 
+
     let (first_species, second_species, depth) = transfer;
     let A_index = first_species;
     let B_index = second_species;
     let FA_index = flat_tree[A_index].parent.unwrap();
     let FB_index = flat_tree[B_index].parent.unwrap();
-
+    assert_eq!(flat_tree[FA_index].parent, None); // FA should be the root
     let mut SA_index;
     if flat_tree[FA_index].left_child == Some(A_index) {
         SA_index = flat_tree[FA_index].right_child.unwrap();
     } else {
         SA_index = flat_tree[FA_index].left_child.unwrap();
     }
-
+    match FB_index {
+        FA_index => {
+            // The receiver is also a child of the root. We have to treat this case separately.
+            change_tree_A_and_B_children_of_root(flat_tree, transfer);
+            return;
+        },
+        _ => {
+        }
+    }
     // SA becomes the root, so it does not have a parent anymore
     flat_tree[SA_index].parent = None;
 
@@ -475,14 +503,37 @@ fn change_tree_comes_from_root_child(flat_tree: &mut Vec<FlatNode>, transfer: (u
     flat_tree[B_index].length = flat_tree[B_index].depth.unwrap() - depth;
 
     // Change SA's length
-    flat_tree[SA_index].length = flat_tree[SA_index].length + flat_tree[FA_index].length;
+    flat_tree[SA_index].length = 0.0; // The node SA is now the root, so it has no length.
 
-    // Change FA's length
-    flat_tree[FA_index].length = flat_tree[FB_index].depth.unwrap() - flat_tree[FA_index].depth.unwrap();
+
+
+    flat_tree[FA_index].length = flat_tree[B_index].depth.unwrap() - depth;
 
     // SA becomes the new root of the tree. All nodes lose a depth equal to the length of SA, which is equal to its depth since it is a child of the root.
     for i in 0..flat_tree.len() {
-        flat_tree[i].depth = flat_tree[i].depth.map(|d| d - flat_tree[SA_index].depth.unwrap());
+        flat_tree[i].depth = flat_tree[i].depth.map(|d| d - depth);
+    }
+}
+
+fn change_tree_A_and_B_children_of_root(flat_tree: &mut Vec<FlatNode>, transfer: (usize, usize, f64)){
+    /* In this special case, both A and B are children of the root. In this case, the root does not change parent, but the length of A and B change, as well as the
+    depths of all nodes since the root is now set at the time of the transfer.
+
+    */
+
+    let (first_species, second_species, depth) = transfer;
+    let A_index = first_species;
+    let B_index = second_species;
+    let FA_index = flat_tree[A_index].parent.unwrap();
+    let FB_index = flat_tree[B_index].parent.unwrap();
+    assert_eq!(flat_tree[FA_index].parent, None); // A should be a child of the root
+    assert_eq!(flat_tree[A_index].parent, flat_tree[B_index].parent, "A is {} and B is {}", flat_tree[A_index].name, flat_tree[B_index].name); // They should have the same parent
+
+
+    flat_tree[A_index].length = flat_tree[A_index].depth.unwrap() - depth;
+    flat_tree[B_index].length = flat_tree[B_index].depth.unwrap() - depth;
+    for node in flat_tree {
+        node.depth = node.depth.map(|d| d - depth);
     }
 }
 
@@ -506,8 +557,10 @@ fn change_tree(flat_tree: &mut Vec<FlatNode>, transfer: (usize, usize, f64)){
     - FB changes children: it previously had B and SB as children, it now has FA and SB as children.
     - B changes length: its new length is the difference between its depth and the depth of the transfer.
     - SA changes length: its new length is the sum of its previous length and the previous length of FA.
-    - FA changes length: its new length is the difference between its depth and the depth of FB.
+    - FA changes depth: its new depth is the depth of the transfer.
+    - FA changes length: its new length is the difference between its new depth (the depth of the transfer) and the depth of FB.
 
+    Remark: the depth of the parent FA of A is also updated, because its new depth is the depth of the transfer.
     Remark: There is a special case if the transfer comes from a node that has the root as a parent. In this case, do not change 
     */
     let (first_species, second_species, depth) = transfer;
@@ -518,7 +571,10 @@ fn change_tree(flat_tree: &mut Vec<FlatNode>, transfer: (usize, usize, f64)){
     let FFA_index;
     match flat_tree[FA_index].parent {
         Some(index) => FFA_index = index,
-        None => return,
+        None => {
+            // The parent of FA is the root. We have to treat this case separately.
+            change_tree_comes_from_root_child(flat_tree, transfer);
+            return;},
     }
 
     // To find sister nodes, we need to look at the children of the parent, and pick the other child
@@ -558,8 +614,11 @@ fn change_tree(flat_tree: &mut Vec<FlatNode>, transfer: (usize, usize, f64)){
     // Change SA's length
     flat_tree[SA_index].length = flat_tree[SA_index].length + flat_tree[FA_index].length;
 
+    // Change FA's depth
+    flat_tree[FA_index].depth = Some(depth);
+
     // Change FA's length
-    flat_tree[FA_index].length = flat_tree[FB_index].depth.unwrap() - flat_tree[FA_index].depth.unwrap();
+    flat_tree[FA_index].length = flat_tree[FA_index].depth.unwrap() - flat_tree[FB_index].depth.unwrap(); // The parent of FA is now FB, so we use FB's depth.
 }
 
 fn create_new_tree(new_flat_tree: &mut Vec<FlatNode>, transfers: Vec<(usize, usize, f64)>) -> () {
@@ -574,6 +633,7 @@ fn find_root_in_flat_tree(flat_tree: &Vec<FlatNode>) -> Option<usize> {
         if flat_tree[i].parent.is_none() {
             if root_index.is_some() {
                 // There is already a node with no parent
+                panic!("There should be only one node with no parent");
                 return None;
             }
             root_index = Some(i);
@@ -582,12 +642,38 @@ fn find_root_in_flat_tree(flat_tree: &Vec<FlatNode>) -> Option<usize> {
     return root_index;
 }
 
-fn output_gene_nwk()
+fn one_gene_simulation(copied_flat_tree: &mut Vec<FlatNode>, n_transfers: usize, contemporaneity: &Vec<Vec<usize>>, cdf: &Vec<f64>, depths: &Vec<f64>) -> () {
+    /*
+    Creates a flat_tree containing the number of flat_nodes specified by the user. Modifies the copied_flat_tree in place.
+    You should hence only pass copies of the species tree to this function to prevent modifying the original tree.
+    --------------------------------
+    Input: a flat tree, a number of transfers, a CDF, a vector of depths.
+    Output: a new flat tree, with the transfers applied.
+    */
+    let transfers = generate_transfers(n_transfers, &contemporaneity, &cdf, &depths);
+    create_new_tree(copied_flat_tree, transfers);
+}
+
+fn one_gene_sim_to_string(copied_flat_tree: &mut Vec<FlatNode>, n_transfers: usize, contemporaneity: &Vec<Vec<usize>>, cdf: &Vec<f64>, depths: &Vec<f64>) -> String {
+    one_gene_simulation(copied_flat_tree, n_transfers, contemporaneity, cdf, depths); // Applies gene transfers and modifies the copied_flat_tree in place.
+    let root_of_gene_tree = find_root_in_flat_tree(copied_flat_tree).expect("There should be a root in the gene tree");
+    let reconstructed_tree = flat_to_node(copied_flat_tree, root_of_gene_tree, None).unwrap();
+    let reconstructed_newick = node_to_newick(&reconstructed_tree) + ";";
+    return reconstructed_newick
+}
 
 
+fn tree_length(flat_tree: &Vec<FlatNode>) -> f64 {
+    let mut length: f64 = 0.0;
+    for i in 0..flat_tree.len() {
+        length += flat_tree[i].length;
+    }
+    return length;
+}
 
 fn main() {
     // Read command line arguments
+    env::set_var("RUST_BACKTRACE", "1");
     let args: Vec<String> = env::args().collect();
     if args.len() != 2 {
         eprintln!("Usage: {} <path_to_nwk_file>", args[0]);
@@ -626,22 +712,40 @@ fn main() {
             // Convert Node representation to FlatNode representation
             let mut flat_tree = Vec::new();
             node_to_flat(&example_tree, &mut flat_tree, None);
-
+            flat_to_node(&flat_tree, 0, None);
+            //println!("Flat_tree: {:?}", flat_tree);
 
             let depths = make_subdivision(&mut flat_tree);
+            println!("Depths: {:?}", depths);
             let intervals = make_intervals(&depths);
             let contemporaneity = find_contemporaneity(&mut flat_tree, &depths);
+            println!("Contemporaneity: {:?}", contemporaneity);
             let n_species = number_of_species(&contemporaneity);
+            println!("Number of species: {:?}", n_species);
+            println!("intervals: {:?}", intervals);
             let cdf = make_CDF(intervals, n_species);
+            println!("CDF in main: {:?}", cdf);
             let choice = choose_from_CDF(&cdf, &depths);
-            for i in 0..100 {
-                let mut copied_flat_tree = flat_tree.clone();
-                let transfers = generate_transfers(100000, &contemporaneity, &cdf, &depths);
-                create_new_tree(&mut copied_flat_tree, transfers);
-            }
+
+            let mut copied_flat_tree = flat_tree.clone();
+            println!("copied flat tree before: {:?}", copied_flat_tree);
+            /*
+            let transfers = generate_transfers(1000, &contemporaneity, &cdf, &depths);
+            create_new_tree(&mut copied_flat_tree, transfers);*/
+            //one_gene_sim_to_string(&mut copied_flat_tree, 1000, &contemporaneity, &cdf, &depths);
+            //one_gene_simulation(&mut copied_flat_tree, 1000, &contemporaneity, &cdf, &depths);
+            let root_of_tree = find_root_in_flat_tree(&copied_flat_tree).unwrap();
+            println!("Root of tree: {}", root_of_tree);
+            one_gene_simulation(&mut copied_flat_tree, 1000, &contemporaneity, &cdf, &depths);
+            let root_of_gene_tree = find_root_in_flat_tree(&copied_flat_tree).expect("There should be a root in the gene tree");
+            println!("Root of gene tree: {}", root_of_gene_tree);
+            println!("copied flat tree: {:?}", copied_flat_tree);
+            let reconstructed_tree = flat_to_node(&copied_flat_tree, root_of_gene_tree, None).unwrap();
+            //let reconstructed_newick = node_to_newick(&reconstructed_tree) + ";";
 
             println!("Choice: {:?}", choice);
             println!("Max depth in the tree: {}", depths[depths.len()-1]);
+            println!("Depths: {:?}", depths);
             //println!("Length of first flatnode: {}", flat_tree[0].length);
             //println!("Total length of flat tree: {}", total_length_of_flat_tree(&flat_tree));
             //println!("Number of nodes in flat tree: {}", flat_tree.len());
