@@ -24,17 +24,19 @@ use std::fs;
 use std::env;
 use std::fs::File;
 use std::io::Write;
+use prettytable::{Table, format, row, cell};
 use time::Instant;
 extern crate regex;
 use regex::Regex;
 use rand::{thread_rng, Rng};
 use rand::seq::SliceRandom;
+
 // ATTENTION : les enfants et parents d'un noeud devront être mutables, ainsi que la longueur.
 
 #[derive(Parser)]
 #[grammar = "newick.pest"]
 struct NewickParser;
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Node {
     name: String,
     left_child: Option<Box<Node>>,
@@ -67,6 +69,30 @@ elements have a duration and a contemporaneity.*/
 struct DurationAndContemporaneity {
     duration: f32,
     contemporaneity: Vec<usize>,
+}
+
+
+fn print_flat_node_table(flat_nodes: &[FlatNode]) {
+    let mut table = Table::new();
+    table.set_format(*format::consts::FORMAT_NO_LINESEP_WITH_TITLE);
+
+    // Adding the header
+    table.add_row(row!["Name", "Left Child", "Right Child", "Parent", "Depth", "Length"]);
+
+    // Adding the rows
+    for flat_node in flat_nodes {
+        table.add_row(row![
+            flat_node.name,
+            flat_node.left_child.map_or("None".to_string(), |v| v.to_string()),
+            flat_node.right_child.map_or("None".to_string(), |v| v.to_string()),
+            flat_node.parent.map_or("None".to_string(), |v| v.to_string()),
+            flat_node.depth.map_or("None".to_string(), |v| format!("{:.6}", v)),
+            format!("{:.6}", flat_node.length),
+        ]);
+    }
+
+    // Printing the table
+    table.printstd();
 }
 
 
@@ -460,34 +486,40 @@ fn change_tree_comes_from_root_child(flat_tree: &mut Vec<FlatNode>, transfer: (u
     - The new root is the sister of the donor SA.
 
     */ 
-
+    println!("The function change_tree_comes_from_root_child has been called.");
+    println!("Function OK");
     let (first_species, second_species, depth) = transfer;
     let A_index = first_species;
     let B_index = second_species;
     let FA_index = flat_tree[A_index].parent.unwrap();
     let FB_index = flat_tree[B_index].parent.unwrap();
     assert_eq!(flat_tree[FA_index].parent, None); // FA should be the root
+
     let mut SA_index;
     if flat_tree[FA_index].left_child == Some(A_index) {
         SA_index = flat_tree[FA_index].right_child.unwrap();
     } else {
         SA_index = flat_tree[FA_index].left_child.unwrap();
     }
-    match FB_index {
-        FA_index => {
+    if FA_index == FB_index {
             // The receiver is also a child of the root. We have to treat this case separately.
+            println!("A and B should have the same father, and this father should be the root. Father of A: {}, father of B: {}", FA_index, FB_index);
             change_tree_A_and_B_children_of_root(flat_tree, transfer);
             return;
-        },
-        _ => {
         }
-    }
+
     // SA becomes the root, so it does not have a parent anymore
     flat_tree[SA_index].parent = None;
 
     // Change FA's parent
     flat_tree[FA_index].parent = Some(FB_index);
 
+    // Change FA's children. We have to know which of A and SA is the left child of FA.
+    if flat_tree[FA_index].left_child == Some(A_index) {
+        flat_tree[FA_index].left_child = Some(B_index);
+    } else {
+        flat_tree[FA_index].right_child = Some(B_index);
+    }
 
     // Change B's parent
     flat_tree[B_index].parent = Some(FA_index);
@@ -509,10 +541,6 @@ fn change_tree_comes_from_root_child(flat_tree: &mut Vec<FlatNode>, transfer: (u
 
     flat_tree[FA_index].length = flat_tree[B_index].depth.unwrap() - depth;
 
-    // SA becomes the new root of the tree. All nodes lose a depth equal to the length of SA, which is equal to its depth since it is a child of the root.
-    for i in 0..flat_tree.len() {
-        flat_tree[i].depth = flat_tree[i].depth.map(|d| d - depth);
-    }
 }
 
 fn change_tree_A_and_B_children_of_root(flat_tree: &mut Vec<FlatNode>, transfer: (usize, usize, f64)){
@@ -520,24 +548,58 @@ fn change_tree_A_and_B_children_of_root(flat_tree: &mut Vec<FlatNode>, transfer:
     depths of all nodes since the root is now set at the time of the transfer.
 
     */
-
+    println!("The function change_tree_A_and_B_children_of_root has been called.");
     let (first_species, second_species, depth) = transfer;
     let A_index = first_species;
     let B_index = second_species;
     let FA_index = flat_tree[A_index].parent.unwrap();
     let FB_index = flat_tree[B_index].parent.unwrap();
     assert_eq!(flat_tree[FA_index].parent, None); // A should be a child of the root
-    assert_eq!(flat_tree[A_index].parent, flat_tree[B_index].parent, "A is {} and B is {}", flat_tree[A_index].name, flat_tree[B_index].name); // They should have the same parent
+    assert_eq!(flat_tree[A_index].parent, flat_tree[B_index].parent); // They should have the same parent
 
 
     flat_tree[A_index].length = flat_tree[A_index].depth.unwrap() - depth;
     flat_tree[B_index].length = flat_tree[B_index].depth.unwrap() - depth;
-    for node in flat_tree {
-        node.depth = node.depth.map(|d| d - depth);
-    }
+
+}
+
+fn change_tree_A_and_B_same_parent(flat_tree: &mut Vec<FlatNode>, transfer: (usize, usize, f64)){
+    /* 
+    A and B have the same parent, so there is no modification in the topology, only in the length and depth of A, B, and their common parent.
+
+    */
+    println!("The function change_tree_A_and_B_same_parent has been called.");
+    
+    let (first_species, second_species, depth) = transfer;
+    let A_index = first_species;
+    let B_index = second_species;
+    let FA_index = flat_tree[A_index].parent.unwrap();
+    let FB_index = flat_tree[B_index].parent.unwrap();
+    println!("In function change_tree_A_and_B_same_parent, A: {}, B: {}, FA: {}, FB: {}", A_index, B_index, FA_index, FB_index);
+    assert_eq!(FA_index, FB_index, "current state of tree {:?}\n transfer {:?}", flat_tree, transfer); // They should have the same parent
+
+    // Change A's length
+    flat_tree[A_index].length = flat_tree[A_index].depth.unwrap() - depth;
+
+    // Change B's length
+    flat_tree[B_index].length = flat_tree[B_index].depth.unwrap() - depth;
+
+    // Change FA's depth
+
+    flat_tree[FA_index].depth = Some(depth);
+
+    // Change FA's length
+
+    flat_tree[FA_index].length = depth - flat_tree[FA_index].depth.unwrap() + flat_tree[FA_index].length;
+
+
+
+
+
 }
 
 fn change_tree(flat_tree: &mut Vec<FlatNode>, transfer: (usize, usize, f64)){
+    println!("{:?}, {:?}, {:?}", flat_tree[transfer.0].name, flat_tree[transfer.1].name, transfer.2);
     /* 
     This function computes the changes that occur in the tree when a transfer occurs.
     --------------------------------
@@ -554,27 +616,76 @@ fn change_tree(flat_tree: &mut Vec<FlatNode>, transfer: (usize, usize, f64)){
     - SA changes parent: the new parent of SA is now FFA instead of FA.
     - FFA changes children: it previously had FA and FB as children, it now has SA and FB as children.
     - B changes parent: the new parent of B is now FA instead of FB.
+    - FA changes children: it previously had A and SA as children, it now has A and B as children.
     - FB changes children: it previously had B and SB as children, it now has FA and SB as children.
     - B changes length: its new length is the difference between its depth and the depth of the transfer.
     - SA changes length: its new length is the sum of its previous length and the previous length of FA.
     - FA changes depth: its new depth is the depth of the transfer.
     - FA changes length: its new length is the difference between its new depth (the depth of the transfer) and the depth of FB.
 
+
+    The nodes which are changed in this operations are therefore: FA (new father, new son replacing SA), FB (New son replacing B), B (New father), SA (new father), FFA (new son replacing FA).
     Remark: the depth of the parent FA of A is also updated, because its new depth is the depth of the transfer.
     Remark: There is a special case if the transfer comes from a node that has the root as a parent. In this case, do not change 
     */
     let (first_species, second_species, depth) = transfer;
+    // --------------------------------
+    //println!("State of the tree before doing anything");
+    //print_flat_node_table(&flat_tree);
+    // --------------------------------
     let A_index = first_species;
     let B_index = second_species;
     let FA_index = flat_tree[A_index].parent.unwrap();
     let FB_index = flat_tree[B_index].parent.unwrap();
     let FFA_index;
+    //println!("A: {}, B: {}, FA: {}, FB: {}", A_index, B_index, FA_index, FB_index);
     match flat_tree[FA_index].parent {
         Some(index) => FFA_index = index,
         None => {
-            // The parent of FA is the root. We have to treat this case separately.
-            change_tree_comes_from_root_child(flat_tree, transfer);
-            return;},
+            // FA is the root. We have to treat this case separately.
+            // 
+            },
+    }
+    //println!("FA: {}, FB: {}\n", FA_index, FB_index);
+
+    //println!("A: {}", flat_tree[A_index].name);
+    //println!("B: {}", flat_tree[B_index].name);
+    //println!("FA: {}", flat_tree[FA_index].name);
+    //println!("FB: {}", flat_tree[FB_index].name);
+    //println!("FFA: {}", flat_tree[FFA_index].name);
+
+    // --------------------------------
+    // Action on FA
+    // --------------------------------
+    // Change FA's parent (IF FA != FB)
+    flat_tree[FA_index].parent = Some(FB_index);
+    // --------------------------------
+    // Change FA's children. We have to know which of A and SA is the left child of FA.
+    if flat_tree[FA_index].left_child == Some(A_index) {
+        flat_tree[FA_index].left_child = Some(B_index);
+    } else {
+        flat_tree[FA_index].right_child = Some(B_index);
+    }
+    // --------------------------------
+    // Change FB's children. We have to know which of B and SB is the left child of FB.
+    if flat_tree[FB_index].left_child == Some(B_index) {
+        flat_tree[FB_index].left_child = Some(FA_index);
+    } else {
+        flat_tree[FB_index].right_child = Some(FA_index);
+    }
+    // --------------------------------
+    // Change B's parent
+    flat_tree[B_index].parent = Some(FA_index);
+    // --------------------------------
+    // Change SA's parent, only if the donor and receiver are not siblings. If they are siblings, the topology does not change. If they are not siblings, the topology changes, and SA's parent is now FFA.
+    // FFA can either be Some or None. If it is None, then SA becomes the root.
+    flat_tree[SA_index].parent = Some(FFA_index);
+    // --------------------------------
+    // Change FFA's children. We have to know which of FA and SFA is the left child of FFA.
+    if flat_tree[FFA_index].left_child == Some(FA_index) {
+        flat_tree[FFA_index].left_child = Some(SA_index);
+    } else {
+        flat_tree[FFA_index].right_child = Some(SA_index);
     }
 
     // To find sister nodes, we need to look at the children of the parent, and pick the other child
@@ -587,19 +698,47 @@ fn change_tree(flat_tree: &mut Vec<FlatNode>, transfer: (usize, usize, f64)){
 
     // Change FA's parent
     flat_tree[FA_index].parent = Some(FB_index);
+    // --------------------------------
+    //println!("State of tree after changing FA's parent");
+    //print_flat_node_table(&flat_tree);
+    // --------------------------------
 
-    // Change SA's parent
-    flat_tree[SA_index].parent = Some(FFA_index);
-
+    // Change SA's parent, only if the donor and receiver are not siblings. If they are siblings, the topology does not change. If they are not siblings, the topology changes, and SA's parent is now FFA.
+    // FFA can either be Some or None. If it is None, then SA becomes the root.
+    if SA_index != B_index {
+        flat_tree[SA_index].parent = Some(FFA_index);
+    }
+    // --------------------------------
+    //println!("State of tree after changing SA's parent");
+    //print_flat_node_table(&flat_tree);
+    // --------------------------------
     // Change FFA's children. We have to know which of FA and FB is the left child of FFA.
     if flat_tree[FFA_index].left_child == Some(FA_index) {
         flat_tree[FFA_index].left_child = Some(SA_index);
     } else {
         flat_tree[FFA_index].right_child = Some(SA_index);
     }
+    // --------------------------------
+    //println!("State of tree after changing FFA's children");
+    //print_flat_node_table(&flat_tree);
+    // --------------------------------
 
     // Change B's parent
     flat_tree[B_index].parent = Some(FA_index);
+    // --------------------------------
+    //println!("State of tree after changing B's parent");
+    //print_flat_node_table(&flat_tree);
+    // --------------------------------
+    // Change FA's children. We have to know which of A and SA is the left child of FA.
+    if flat_tree[FA_index].left_child == Some(A_index) {
+        flat_tree[FA_index].left_child = Some(B_index);
+    } else {
+        flat_tree[FA_index].right_child = Some(B_index);
+    }
+    // --------------------------------
+    //println!("State of tree after changing FA's children");
+    //print_flat_node_table(&flat_tree);
+    // --------------------------------
 
     // Change FB's children. We have to know which of B and SB is the left child of FB.
     if flat_tree[FB_index].left_child == Some(B_index) {
@@ -607,6 +746,10 @@ fn change_tree(flat_tree: &mut Vec<FlatNode>, transfer: (usize, usize, f64)){
     } else {
         flat_tree[FB_index].right_child = Some(FA_index);
     }
+    // --------------------------------
+    //println!("State of tree after changing FB's children");
+    //print_flat_node_table(&flat_tree);
+    // --------------------------------
 
     // Change B's length
     flat_tree[B_index].length = flat_tree[B_index].depth.unwrap() - depth;
@@ -620,6 +763,8 @@ fn change_tree(flat_tree: &mut Vec<FlatNode>, transfer: (usize, usize, f64)){
     // Change FA's length
     flat_tree[FA_index].length = flat_tree[FA_index].depth.unwrap() - flat_tree[FB_index].depth.unwrap(); // The parent of FA is now FB, so we use FB's depth.
 }
+
+
 
 fn create_new_tree(new_flat_tree: &mut Vec<FlatNode>, transfers: Vec<(usize, usize, f64)>) -> () {
     for transfer in transfers {
@@ -650,7 +795,8 @@ fn one_gene_simulation(copied_flat_tree: &mut Vec<FlatNode>, n_transfers: usize,
     Input: a flat tree, a number of transfers, a CDF, a vector of depths.
     Output: a new flat tree, with the transfers applied.
     */
-    let transfers = generate_transfers(n_transfers, &contemporaneity, &cdf, &depths);
+    let mut transfers = generate_transfers(n_transfers, &contemporaneity, &cdf, &depths);
+    transfers.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap()); // Sort the transfers by depth
     create_new_tree(copied_flat_tree, transfers);
 }
 
@@ -716,45 +862,55 @@ fn main() {
             //println!("Flat_tree: {:?}", flat_tree);
 
             let depths = make_subdivision(&mut flat_tree);
-            println!("Depths: {:?}", depths);
+            //println!("Depths: {:?}", depths);
             let intervals = make_intervals(&depths);
             let contemporaneity = find_contemporaneity(&mut flat_tree, &depths);
-            println!("Contemporaneity: {:?}", contemporaneity);
+            //println!("Contemporaneity: {:?}", contemporaneity);
             let n_species = number_of_species(&contemporaneity);
-            println!("Number of species: {:?}", n_species);
-            println!("intervals: {:?}", intervals);
+            //println!("Number of species: {:?}", n_species);
+            //println!("intervals: {:?}", intervals);
             let cdf = make_CDF(intervals, n_species);
-            println!("CDF in main: {:?}", cdf);
+            //println!("CDF in main: {:?}", cdf);
             let choice = choose_from_CDF(&cdf, &depths);
 
+
+
             let mut copied_flat_tree = flat_tree.clone();
-            println!("copied flat tree before: {:?}", copied_flat_tree);
+            //print_flat_node_table(&copied_flat_tree);
+            //println!("copied flat tree before: {:?}", copied_flat_tree);
             /*
             let transfers = generate_transfers(1000, &contemporaneity, &cdf, &depths);
             create_new_tree(&mut copied_flat_tree, transfers);*/
             //one_gene_sim_to_string(&mut copied_flat_tree, 1000, &contemporaneity, &cdf, &depths);
             //one_gene_simulation(&mut copied_flat_tree, 1000, &contemporaneity, &cdf, &depths);
             let root_of_tree = find_root_in_flat_tree(&copied_flat_tree).unwrap();
-            println!("Root of tree: {}", root_of_tree);
-            one_gene_simulation(&mut copied_flat_tree, 1000, &contemporaneity, &cdf, &depths);
+            //println!("Root of tree: {}", root_of_tree);
+            one_gene_simulation(&mut copied_flat_tree, 1, &contemporaneity, &cdf, &depths);
             let root_of_gene_tree = find_root_in_flat_tree(&copied_flat_tree).expect("There should be a root in the gene tree");
-            println!("Root of gene tree: {}", root_of_gene_tree);
-            println!("copied flat tree: {:?}", copied_flat_tree);
+            //println!("Root of gene tree: {}", root_of_gene_tree);
+            //println!("copied flat tree after: {:?}", copied_flat_tree);
+            //print_flat_node_table(&copied_flat_tree);
             let reconstructed_tree = flat_to_node(&copied_flat_tree, root_of_gene_tree, None).unwrap();
-            //let reconstructed_newick = node_to_newick(&reconstructed_tree) + ";";
-
-            println!("Choice: {:?}", choice);
-            println!("Max depth in the tree: {}", depths[depths.len()-1]);
-            println!("Depths: {:?}", depths);
+            //println!("Reconstructed tree: {:?}", reconstructed_tree);
+            let reconstructed_newick = node_to_newick(&reconstructed_tree) + ";";
+            println!("Reconstructed newick: {}", reconstructed_newick);
+            let mut copied_flat_tree2 = flat_tree.clone();
+            //println!("copied flat tree 2 before: {:?}", copied_flat_tree2);
+            //let result_nwk = one_gene_sim_to_string(&mut copied_flat_tree2, 1000, &contemporaneity, &cdf, &depths);
+            //println!("copied flat tree 2 after: {:?}", copied_flat_tree2);
+            //println!("Result nwk: {}", result_nwk);
+            //println!("Choice: {:?}", choice);
+            //println!("Max depth in the tree: {}", depths[depths.len()-1]);
+            //println!("Depths: {:?}", depths);
             //println!("Length of first flatnode: {}", flat_tree[0].length);
             //println!("Total length of flat tree: {}", total_length_of_flat_tree(&flat_tree));
             //println!("Number of nodes in flat tree: {}", flat_tree.len());
             // Convert FlatNode representation back to Node representation
             // Now, we have to find the root in the flat tree. The root should be the node with no parent.
-            let reconstructed_tree = flat_to_node(&flat_tree, 0, None).unwrap();
+            //let reconstructed_tree = flat_to_node(&flat_tree, 0, None).unwrap();
 
             // Convert Node representation back to Newick format and print
-            let reconstructed_newick = node_to_newick(&reconstructed_tree) + ";";
+            //let reconstructed_newick = node_to_newick(&reconstructed_tree) + ";";
         }
     }
 
