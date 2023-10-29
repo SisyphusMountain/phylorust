@@ -19,18 +19,16 @@ Gros problème pour des arbres avec énormément de noeuds ou pour le paralléli
 extern crate pest_derive;
 #[allow(dead_code)]
 use pest::Parser;
-use newick;
 use std::fs;
+use std::io::{self, Write};
+use std::path::Path;
 use std::env;
 use std::fs::File;
-use std::io::Write;
-use std::path::Path;
 use prettytable::{Table, format, row, cell};
 use time::Instant;
 extern crate regex;
 use regex::Regex;
 use rand::{thread_rng, Rng};
-use rand::seq::SliceRandom;
 use pest::error::Error;
 use csv::Writer;
 
@@ -63,12 +61,8 @@ struct FlatNode {
     depth: Option<f64>,
     length: f64,
 }
-/* I will later create a subdivision, which will be a vector where all 
-elements have a duration and a contemporaneity.*/
-struct DurationAndContemporaneity {
-    duration: f32,
-    contemporaneity: Vec<usize>,
-}
+// --------------------------------
+// FUNCTIONS ONLY USED FOR DEBUGGING
 fn print_flat_node_table(flat_nodes: &[FlatNode]) {
     let mut table = Table::new();
     table.set_format(*format::consts::FORMAT_NO_LINESEP_WITH_TITLE);
@@ -91,6 +85,42 @@ fn print_flat_node_table(flat_nodes: &[FlatNode]) {
     // Printing the table
     table.printstd();
 }
+fn compare_trees(node1: &Node, node2: &Node) -> bool {
+    if node1.name != node2.name || (node1.length - node2.length).abs() > 1e-6 {
+        return false;
+    }
+
+    match (&node1.left_child, &node2.left_child) {
+        (Some(l1), Some(l2)) if !compare_trees(l1, l2) => return false,
+        (None, None) => {},
+        _ => return false,
+    }
+
+    match (&node1.right_child, &node2.right_child) {
+        (Some(r1), Some(r2)) if !compare_trees(r1, r2) => return false,
+        (None, None) => {},
+        _ => return false,
+    }
+    
+    true
+}
+fn traverse_tree(node: &Node) {
+    println!("Node: {}", node.name);
+
+    if let Some(left_child) = &node.left_child {
+        println!("Traversing left child of {}", node.name);
+        traverse_tree(left_child);
+    }
+
+    if let Some(right_child) = &node.right_child {
+        println!("Traversing right child of {}", node.name);
+        traverse_tree(right_child);
+    }
+}
+fn total_length_of_flat_tree(flat_tree: &[FlatNode]) -> f64 {
+    flat_tree.iter().map(|node| node.length).sum()
+}
+// --------------------------------
 // The following two functions are used to convert a newick string into an arborescent Tree structure, where each "Node" object owns its two children in a Box object.
 fn newick_to_tree(pair: pest::iterators::Pair<Rule>) -> Vec<Node> {
     let mut vec_trees:Vec<Node> = Vec::new();
@@ -205,13 +235,13 @@ fn handle_pair(pair: pest::iterators::Pair<Rule>) -> Option<Node> {
         },
     }
 }
+// --------------------------------
 // Convert a Tree in "Node" form to a Newick string.
 fn node_to_newick(node: &Node) -> String {
     /* Takes a node and returns the corresponding subtree in Newick format.
         --------------------------------
         INPUT:
             - node: the node to convert to Newick format.
-
         OUTPUT:
             - the Newick representation of the subtree rooted at node.
         Warning: rounds the lengths to 6 decimal places.
@@ -281,22 +311,6 @@ fn node_to_flat(node: &Node, flat_tree: &mut Vec<FlatNode>, parent: Option<usize
     }
 
     index
-}
-fn traverse_tree(node: &Node) {
-    println!("Node: {}", node.name);
-
-    if let Some(left_child) = &node.left_child {
-        println!("Traversing left child of {}", node.name);
-        traverse_tree(left_child);
-    }
-
-    if let Some(right_child) = &node.right_child {
-        println!("Traversing right child of {}", node.name);
-        traverse_tree(right_child);
-    }
-}
-fn total_length_of_flat_tree(flat_tree: &[FlatNode]) -> f64 {
-    flat_tree.iter().map(|node| node.length).sum()
 }
 fn give_depth(node: &mut Node, depth: f64) {
     node.depth = Some(depth);
@@ -612,34 +626,74 @@ fn find_root_in_flat_tree(flat_tree: &Vec<FlatNode>) -> Option<usize> {
     return root_index;
 }
 
-fn one_gene_sim_to_string(copied_flat_tree: &mut Vec<FlatNode>, n_transfers: usize, contemporaneity: &Vec<Vec<usize>>, cdf: &Vec<f64>, depths: &Vec<f64>, gene_index: u32) -> String {
+fn one_gene_sim_to_string(
+    copied_flat_tree: &mut Vec<FlatNode>,
+    n_transfers: usize,
+    contemporaneity: &Vec<Vec<usize>>,
+    cdf: &Vec<f64>,
+    depths: &Vec<f64>,
+    gene_index: u32,
+    output_dir: &str
+) -> Result<String, io::Error> {
+    // Ensure the output directory exists
+    fs::create_dir_all(output_dir)?;
+
+    // Paths for transfers and genes directories
+    let transfers_dir = Path::new(output_dir).join("transfers");
+    let genes_dir = Path::new(output_dir).join("genes");
+
+    // Ensure the transfers and genes directories exist
+    fs::create_dir_all(&transfers_dir)?;
+    fs::create_dir_all(&genes_dir)?;
+
     // Create transfers
-    let mut transfers = generate_transfers(n_transfers, &contemporaneity, &cdf, &depths);
-    // Export them to a CSV file
-    let filename = format!("transfers_{}.csv", gene_index);
-    make_transfers_csv(copied_flat_tree, &transfers, filename.as_str()).expect("Failed to write CSV file");
+    let transfers = generate_transfers(n_transfers, contemporaneity, cdf, depths);
+
+    // Export them to a CSV file in the transfers directory
+    let transfer_filename = transfers_dir.join(format!("transfers_{}.csv", gene_index));
+    make_transfers_csv(copied_flat_tree, &transfers, transfer_filename.to_str().unwrap())
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
     // Generate gene tree as a flat tree
     create_new_tree(copied_flat_tree, transfers);
 
-    let root_of_gene_tree = find_root_in_flat_tree(copied_flat_tree).expect("There should be a root in the gene tree");
-    // flat tree to classical arborescent tree
-    let mut reconstructed_tree = flat_to_node(copied_flat_tree, root_of_gene_tree, None).unwrap();
+    let root_of_gene_tree = find_root_in_flat_tree(copied_flat_tree)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "There should be a root in the gene tree"))?;
+    
+    // Flat tree to classical arborescent tree
+    let mut reconstructed_tree = flat_to_node(copied_flat_tree, root_of_gene_tree, None)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Failed to convert flat tree to node tree"))?;
+    
     // The lengths of the nodes are not correct, so we need to update them.
-    let root_depth = reconstructed_tree.depth.unwrap();
+    let root_depth = reconstructed_tree.depth
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Root depth not found"))?;
     depths_to_lengths(&mut reconstructed_tree, root_depth);
-    // Convert the arborescent tree to a newick string
+    
+    // Convert the arborescent tree to a Newick string
     let reconstructed_newick = node_to_newick(&reconstructed_tree) + ";";
-    let mut gene_file = File::create(format!("gene_{}.nwk", gene_index)).expect("Failed to create file");
-    gene_file.write_all(reconstructed_newick.as_bytes()).expect("Failed to write to file");
-    return reconstructed_newick;
+    
+    // Save the gene tree as a Newick string in the genes directory
+    let gene_filename = genes_dir.join(format!("gene_{}.nwk", gene_index));
+    let mut gene_file = File::create(gene_filename)?;
+    gene_file.write_all(reconstructed_newick.as_bytes())?;
+    
+    Ok(reconstructed_newick)
 }
 
-fn create_many_genes(copied_flat_tree: &mut Vec<FlatNode>, n_transfers_vec: Vec<usize>, contemporaneity: &Vec<Vec<usize>>, cdf: &Vec<f64>, depths: &Vec<f64>) -> () {
-    for (i, n_transfers) in n_transfers_vec.iter().enumerate(){
+fn create_many_genes(
+    copied_flat_tree: &mut Vec<FlatNode>, 
+    n_transfers_vec: Vec<usize>, 
+    contemporaneity: &Vec<Vec<usize>>, 
+    cdf: &Vec<f64>, 
+    depths: &Vec<f64>,
+    output_dir: &str
+) -> () {
+    for (i, n_transfers) in n_transfers_vec.iter().enumerate() {
         let mut copied_flat_tree2 = copied_flat_tree.clone();
-        let n_transfers_usize = *n_transfers; // Convert &usize to usize, then to u32
-        one_gene_sim_to_string(&mut copied_flat_tree2, n_transfers_usize, contemporaneity, cdf, depths, i as u32);
-        //print_flat_node_table(&copied_flat_tree2);
+        let n_transfers_usize = *n_transfers; // Convert &usize to usize
+
+
+        one_gene_sim_to_string(&mut copied_flat_tree2, n_transfers_usize, contemporaneity, cdf, depths, i as u32, output_dir);
     }
 }
 
@@ -655,33 +709,45 @@ fn main() {
     // Read command line arguments
     env::set_var("RUST_BACKTRACE", "1");
     let args: Vec<String> = env::args().collect();
-    if args.len() != 2 {
-        eprintln!("Usage: {} <path_to_nwk_file>", args[0]);
+    if args.len() != 4 {
+        eprintln!("Usage: {} <path_to_nwk_file> <output_directory> <path_to_transfers_file>", args[0]);
         return;
     }
 
-    // Read the .nwk file content
+    let nwk_file_path = &args[1];
+    let output_dir = &args[2];
+    let transfers_file_path = &args[3];
+
+    // Ensure the output directory exists
+    fs::create_dir_all(output_dir).expect("Failed to create output directory");
+
     let start = Instant::now();
-    let content = fs::read_to_string(&args[1]).expect("Failed to read the file");
+    let content = fs::read_to_string(nwk_file_path).expect("Failed to read the file");
     let re = Regex::new(r"\s+").unwrap();  // Matches any whitespace characters
     let sanitized_content = re.replace_all(&content, "");
-    // Split the content by ; to get individual trees
     let trees: Vec<String> = sanitized_content.split(';')
-    .filter_map(|tree| {
-        let trimmed = tree.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string() + ";")
-        }
-    })
-    .collect();
+        .filter_map(|tree| {
+            let trimmed = tree.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string() + ";")
+            }
+        })
+        .collect();
 
+    let transfers_content = fs::read_to_string(transfers_file_path)
+        .expect("Failed to read transfers file");
+    let n_transfers: Vec<usize> = transfers_content.trim()
+        .split(',')
+        .filter_map(|n| n.parse().ok())
+        .collect();
 
     let mut number_of_trees = 0;
+    for (index, tree) in trees.iter().enumerate() {
+        let tree_output_dir = Path::new(output_dir).join(format!("tree_{}", index));
+        fs::create_dir_all(&tree_output_dir).expect("Failed to create tree output directory");
 
-    for tree in trees {
-        // Parse each tree to get the Node representation
         let pairs = NewickParser::parse(Rule::newick, &tree).unwrap_or_else(|e| panic!("fail"));
         for pair in pairs {
             number_of_trees += 1;
@@ -689,62 +755,29 @@ fn main() {
             let mut example_tree = vec_trees.pop().unwrap();
             give_depth(&mut example_tree, 0.0);
 
-            // Convert Node representation to FlatNode representation
             let mut flat_tree = Vec::new();
             node_to_flat(&example_tree, &mut flat_tree, None);
-            flat_to_node(&flat_tree, 0, None);
-            //println!("Flat_tree: {:?}", flat_tree);
 
             let depths = make_subdivision(&mut flat_tree);
-            //println!("Depths: {:?}", depths);
             let intervals = make_intervals(&depths);
             let contemporaneity = find_contemporaneity(&mut flat_tree, &depths);
-            //println!("Contemporaneity: {:?}", contemporaneity);
             let n_species = number_of_species(&contemporaneity);
-            //println!("Number of species: {:?}", n_species);
-            //println!("intervals: {:?}", intervals);
             let cdf = make_CDF(intervals, n_species);
-            //println!("CDF in main: {:?}", cdf);
             let choice = choose_from_CDF(&cdf, &depths);
 
-
-
             let mut copied_flat_tree = flat_tree.clone();
-            create_many_genes(&mut copied_flat_tree, vec![10000;1000], &contemporaneity, &cdf, &depths);
-            //print_flat_node_table(&copied_flat_tree);
-            //println!("copied flat tree before: {:?}", copied_flat_tree);
-            /*
-            let transfers = generate_transfers(1000, &contemporaneity, &cdf, &depths);
-            create_new_tree(&mut copied_flat_tree, transfers);*/
-            //one_gene_sim_to_string(&mut copied_flat_tree, 1000, &contemporaneity, &cdf, &depths);
-            //one_gene_simulation(&mut copied_flat_tree, 1000, &contemporaneity, &cdf, &depths);
-
-            //println!("Root of tree: {}", root_of_tree);
-
-
+            create_many_genes(
+                &mut copied_flat_tree,
+                n_transfers.clone(),
+                &contemporaneity,
+                &cdf,
+                &depths,
+                &tree_output_dir.to_string_lossy().to_string()
+            );
         }
     }
 
     let duration = start.elapsed();
     println!("Number of trees: {}", number_of_trees);
     println!("Time taken: {} seconds", duration.as_seconds_f64());
-}
-fn compare_trees(node1: &Node, node2: &Node) -> bool {
-    if node1.name != node2.name || (node1.length - node2.length).abs() > 1e-6 {
-        return false;
-    }
-
-    match (&node1.left_child, &node2.left_child) {
-        (Some(l1), Some(l2)) if !compare_trees(l1, l2) => return false,
-        (None, None) => {},
-        _ => return false,
-    }
-
-    match (&node1.right_child, &node2.right_child) {
-        (Some(r1), Some(r2)) if !compare_trees(r1, r2) => return false,
-        (None, None) => {},
-        _ => return false,
-    }
-    
-    true
 }
