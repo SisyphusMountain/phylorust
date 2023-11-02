@@ -1,5 +1,5 @@
 # Installing
-1. (Install Cargo)[https://doc.rust-lang.org/cargo/getting-started/installation.html] (Rust package manager)
+1. [Install Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html) (Rust package manager)
 2. Clone this repository
 3. Move to your local copy of the repository and execute the command
  ```
