@@ -15,4 +15,4 @@ cargo build --release
    ```
    ./target/release/gene_tree_sim "./tree4.nwk" "./test_folder" "./transfer_file.txt"
    ```
-2. This will simulate 1000 transfers on 1024 gene trees for the species tree tree4.nwk, in test_folder.
+2. This will simulate 1000 transfers on 1024 gene trees for the species tree tree4.nwk, in test_folder/tree_0. Note that if tree4.nwk contains several trees separated by commas, each of these trees will be treated in a folder test_folder/tree_i.
