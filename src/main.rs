@@ -1,5 +1,24 @@
-
 /*
+SCRIPT gene_tree_sim
+--------------------------------------------------------------------------------
+This script takes:
+- a tree in a format like such: ((a:1.0,b:1.0)c:1.0,d:2.0)e:0.0; (with necessary ; at the end, and no [&R] at the beginning)
+- a path to the output directory
+- a path to the "transfer file", which is a text file containing a list
+of number of transfers to simulate for each gene tree that the algorithm will produce. example:  23,10,11100,121,
+- a seed for the random number generator.
+--------------------------------------------------------------------------------
+Output:
+new files created: 
+- output_folder/genes/gene_i.nwk (newick gene tree)
+with format (a:1.000000,(b:0.056798,d:0.056798)e:0.943202)c:1.000000;
+- output_folder/transfers/transfers_i.csv
+with format 
+Donor,Recipient,Depth
+b,d,1.9432018717076178
+--------------------------------------------------------------------------------
+
+
 TODO: The function computing the time subdivision probably creates too many values, because the terminal contemporaneous nodes
 may all have similar but different depths due to approximation errors.
 
@@ -17,7 +36,6 @@ Rename contemporanous_vector in find_closest? Appropriate name?
 
 #[macro_use]
 extern crate pest_derive;
-#[allow(dead_code)]
 use pest::Parser;
 use std::fs;
 use std::io::{self, Write};
@@ -28,7 +46,8 @@ use prettytable::{Table, format, row};
 use time::Instant;
 extern crate regex;
 use regex::Regex;
-use rand::{thread_rng, Rng};
+use rand::{Rng, SeedableRng};
+use rand::rngs::StdRng;
 use csv::Writer;
 
 
@@ -560,7 +579,7 @@ fn make_CDF(intervals: Vec<f64>, number_of_species: Vec<f64>) -> Vec<f64> {
     }
     return CDF;
 }
-fn choose_from_CDF(CDF: &Vec<f64>, depths: &Vec<f64>) -> (f64, usize) {
+fn choose_from_CDF(CDF: &Vec<f64>, depths: &Vec<f64>, rng: &mut StdRng) -> (f64, usize) {
     /* The CDF allows us to compute the probability of a given interval being chosen,
     by picking a random number between 0 and 1 and finding the interval it falls into.
     First, we compute the index of the first depth that is larger than the random number.
@@ -584,7 +603,6 @@ fn choose_from_CDF(CDF: &Vec<f64>, depths: &Vec<f64>) -> (f64, usize) {
     Output:
     - A choice of a transfer time as well as an interval index.
     */
-    let mut rng = thread_rng();
     let r: f64 = rng.gen_range(0.0..1.0);
     let index = match CDF.binary_search_by(|&probe| probe.partial_cmp(&r).unwrap_or(std::cmp::Ordering::Less)) {
         Ok(index) => index, // Found an exact match, use `index`.
@@ -604,7 +622,7 @@ fn choose_from_CDF(CDF: &Vec<f64>, depths: &Vec<f64>) -> (f64, usize) {
     let depth = (r - CDF[index-1])/(CDF[index] - CDF[index-1]) * (depths[index] - depths[index-1]) + depths[index-1];
     return (depth, index);
 }
-fn random_pair(vec: &Vec<usize>) -> Option<(usize, usize)> {
+fn random_pair(vec: &Vec<usize>, rng: &mut StdRng) -> Option<(usize, usize)> {
     /* 
     Picks one species, then tries to pick another one that is contemporaneous until the donor and receiver are different.
     ----------------------------------
@@ -618,7 +636,6 @@ fn random_pair(vec: &Vec<usize>) -> Option<(usize, usize)> {
         return None;
     }
 
-    let mut rng = thread_rng();
     let first_index = rng.gen_range(0..vec.len());
     let mut second_index = rng.gen_range(0..vec.len());
     while second_index == first_index {
@@ -627,7 +644,7 @@ fn random_pair(vec: &Vec<usize>) -> Option<(usize, usize)> {
 
     Some((vec[first_index], vec[second_index]))
 }
-fn generate_transfers(n_transfers: usize, contemporaneity: &Vec<Vec<usize>>, CDF: &Vec<f64>, depths: &Vec<f64>) -> Vec<(usize, usize, f64)> {
+fn generate_transfers(n_transfers: usize, contemporaneity: &Vec<Vec<usize>>, CDF: &Vec<f64>, depths: &Vec<f64>, rng: &mut StdRng) -> Vec<(usize, usize, f64)> {
     /* Generates an arbitrary number of uniformly distributed transfers.
     ----------------------------------
     Input:
@@ -641,9 +658,9 @@ fn generate_transfers(n_transfers: usize, contemporaneity: &Vec<Vec<usize>>, CDF
     */
     let mut transfers: Vec<(usize, usize, f64)> = Vec::new();
     for _ in 0..n_transfers {
-        let (depth, index) = choose_from_CDF(CDF, depths);
+        let (depth, index) = choose_from_CDF(CDF, depths, rng);
         let contemporaneous_species_vector = &contemporaneity[index];
-        if let Some((first_species, second_species)) = random_pair(contemporaneous_species_vector) {
+        if let Some((first_species, second_species)) = random_pair(contemporaneous_species_vector, rng) {
             transfers.push((first_species, second_species, depth));
         }
     }
@@ -760,7 +777,6 @@ fn change_tree(flat_tree: &mut Vec<FlatNode>, transfer: (usize, usize, f64)){
         flat_tree[FB_index].depth = Some(depth);
 
     }
-
 fn create_new_tree(new_flat_tree: &mut Vec<FlatNode>, transfers: Vec<(usize, usize, f64)>) -> () {
     /* Only applies all transfers to the tree.
     ----------------------------------
@@ -800,7 +816,6 @@ fn find_root_in_flat_tree(flat_tree: &Vec<FlatNode>) -> Option<usize> {
     }
     return root_index;
 }
-
 fn one_gene_sim_to_string(
     copied_flat_tree: &mut Vec<FlatNode>,
     n_transfers: usize,
@@ -808,7 +823,8 @@ fn one_gene_sim_to_string(
     cdf: &Vec<f64>,
     depths: &Vec<f64>,
     gene_index: u32,
-    output_dir: &str
+    output_dir: &str,
+    rng: &mut StdRng,
 ) -> Result<String, io::Error> {
     /*
     Performs all the steps necessary to create a gene tree from a species tree.
@@ -838,7 +854,7 @@ fn one_gene_sim_to_string(
     fs::create_dir_all(&genes_dir)?;
 
     // Create transfers
-    let transfers = generate_transfers(n_transfers, contemporaneity, cdf, depths);
+    let transfers = generate_transfers(n_transfers, contemporaneity, cdf, depths, rng);
 
     // Export them to a CSV file in the transfers directory
     let transfer_filename = transfers_dir.join(format!("transfers_{}.csv", gene_index));
@@ -870,15 +886,7 @@ fn one_gene_sim_to_string(
     
     Ok(reconstructed_newick)
 }
-
-fn create_many_genes(
-    copied_flat_tree: &mut Vec<FlatNode>, 
-    n_transfers_vec: Vec<usize>, 
-    contemporaneity: &Vec<Vec<usize>>, 
-    cdf: &Vec<f64>, 
-    depths: &Vec<f64>,
-    output_dir: &str
-) -> () {
+fn create_many_genes(copied_flat_tree: &mut Vec<FlatNode>, n_transfers_vec: Vec<usize>, contemporaneity: &Vec<Vec<usize>>, cdf: &Vec<f64>, depths: &Vec<f64>,output_dir: &str, rng: &mut StdRng) -> () {
     /*
     Repeatedly simulates gene trees.
     ----------------------------------
@@ -896,7 +904,7 @@ fn create_many_genes(
     for (i, n_transfers) in n_transfers_vec.iter().enumerate() {
         let mut copied_flat_tree2 = copied_flat_tree.clone();
         let n_transfers_usize = *n_transfers; // Convert &usize to usize
-        let _ = one_gene_sim_to_string(&mut copied_flat_tree2, n_transfers_usize, contemporaneity, cdf, depths, i as u32, output_dir);// No useful output variable.
+        let _ = one_gene_sim_to_string(&mut copied_flat_tree2, n_transfers_usize, contemporaneity, cdf, depths, i as u32, output_dir, rng);// No useful output variable.
     }
 }
 
@@ -906,15 +914,23 @@ fn main() {
     // Read command line arguments
     env::set_var("RUST_BACKTRACE", "1");
     let args: Vec<String> = env::args().collect();
-    if args.len() != 4 {
-        eprintln!("Usage: {} <path_to_nwk_file> <output_directory> <path_to_transfers_file>", args[0]);
+    if args.len() != 5 {
+        eprintln!("Usage: {} <path_to_nwk_file> <output_directory> <path_to_transfers_file> <rng_seed>", args[0]);
         return;
     }
 
     let nwk_file_path = &args[1];
     let output_dir = &args[2];
     let transfers_file_path = &args[3];
+    let rng_seed_str = &args[4];
 
+    // Convert rng_seed_str to u64
+    let seed = rng_seed_str.parse::<u64>().unwrap_or_else(|e| {
+        eprintln!("Error parsing RNG seed: {}", e);
+        std::process::exit(1);
+    });
+    
+    let mut rng = StdRng::seed_from_u64(seed);
     // Ensure the output directory exists
     fs::create_dir_all(output_dir).expect("Failed to create output directory");
 
@@ -968,12 +984,13 @@ fn main() {
                 &contemporaneity,
                 &cdf,
                 &depths,
-                &tree_output_dir.to_string_lossy().to_string()
+                &tree_output_dir.to_string_lossy().to_string(),
+                &mut rng
             );
         }
     }
 
     let duration = start.elapsed();
-    println!("Number of trees: {}", number_of_trees);
-    println!("Time taken: {} seconds", duration.as_seconds_f64());
+    //println!("Number of trees: {}", number_of_trees);
+    //println!("Time taken: {} seconds", duration.as_seconds_f64());
 }

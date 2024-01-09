@@ -7,7 +7,7 @@ cargo build --release
 ```
 4. Execute the program by typing
 ```
-./target/release/rust <path_to_nwk_file> <output_directory> <path_to_transfers_file>
+./target/release/rust <path_to_nwk_file> <output_directory> <path_to_transfers_file> <seed>
 ```
 
 # Example
